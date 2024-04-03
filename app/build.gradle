@@ -1,0 +1,27 @@
+apply plugin: 'com.android.application'
+
+android {
+    compileSdkVersion 24
+    buildToolsVersion "29.0.2"
+
+    defaultConfig {
+        applicationId "com.herohan.rknn_yolov5"
+        archivesBaseName = "$applicationId"
+
+        ndk {
+            moduleName "rknn_yolov5"
+            abiFilters "armeabi-v7a", "arm64-v8a"
+        }
+        minSdkVersion 24
+    }
+
+    externalNativeBuild {
+//        cmake {
+//            version "3.10.2"
+//            path file('src/main/jni/CMakeLists.txt')
+//        }
+        ndkBuild {
+            path file('src/main/jni/Android.mk')
+        }
+    }
+}

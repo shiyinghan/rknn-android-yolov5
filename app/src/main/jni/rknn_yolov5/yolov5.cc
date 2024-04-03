@@ -25,7 +25,7 @@
 //#define PERF_DETAIL
 
 static void dump_tensor_attr(rknn_tensor_attr *attr) {
-    printf("  index=%d, name=%s, n_dims=%d, dims=[%d, %d, %d, %d], n_elems=%d, size=%d, fmt=%s, type=%s, qnt_type=%s, "
+    LOGI("  index=%d, name=%s, n_dims=%d, dims=[%d, %d, %d, %d], n_elems=%d, size=%d, fmt=%s, type=%s, qnt_type=%s, "
            "zp=%d, scale=%f\n",
            attr->index, attr->name, attr->n_dims, attr->dims[0], attr->dims[1], attr->dims[2],
            attr->dims[3],
@@ -42,7 +42,7 @@ int init_yolov5_model(const char *model_path, rknn_app_context_t *app_ctx) {
     // Load RKNN Model
     model_len = read_data_from_file(model_path, &model);
     if (model == NULL) {
-        printf("load_model fail!\n");
+        LOGE("load_model fail!\n");
         return -1;
     }
 
@@ -57,7 +57,7 @@ int init_yolov5_model(const char *model_path, rknn_app_context_t *app_ctx) {
     ret = rknn_init(&ctx, model, model_len, flag, NULL);
     free(model);
     if (ret < 0) {
-        printf("rknn_init fail! ret=%d\n", ret);
+        LOGE("rknn_init fail! ret=%d\n", ret);
         return -1;
     }
 
@@ -67,34 +67,34 @@ int init_yolov5_model(const char *model_path, rknn_app_context_t *app_ctx) {
     rknn_input_output_num io_num;
     ret = rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
     if (ret != RKNN_SUCC) {
-        printf("rknn_query fail! ret=%d\n", ret);
+        LOGE("rknn_query fail! ret=%d\n", ret);
         return -1;
     }
-    printf("model input num: %d, output num: %d\n", io_num.n_input, io_num.n_output);
+    LOGI("model input num: %d, output num: %d\n", io_num.n_input, io_num.n_output);
 
     // Get Model Input Info
-    printf("input tensors:\n");
+    LOGI("input tensors:\n");
     rknn_tensor_attr input_attrs[io_num.n_input];
     memset(input_attrs, 0, sizeof(input_attrs));
     for (int i = 0; i < io_num.n_input; i++) {
         input_attrs[i].index = i;
         ret = rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
         if (ret != RKNN_SUCC) {
-            printf("rknn_query fail! ret=%d\n", ret);
+            LOGE("rknn_query fail! ret=%d\n", ret);
             return -1;
         }
         dump_tensor_attr(&(input_attrs[i]));
     }
 
     // Get Model Output Info
-    printf("output tensors:\n");
+    LOGI("output tensors:\n");
     rknn_tensor_attr output_attrs[io_num.n_output];
     memset(output_attrs, 0, sizeof(output_attrs));
     for (int i = 0; i < io_num.n_output; i++) {
         output_attrs[i].index = i;
         ret = rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
         if (ret != RKNN_SUCC) {
-            printf("rknn_query fail! ret=%d\n", ret);
+            LOGE("rknn_query fail! ret=%d\n", ret);
             return -1;
         }
         dump_tensor_attr(&(output_attrs[i]));
@@ -118,17 +118,17 @@ int init_yolov5_model(const char *model_path, rknn_app_context_t *app_ctx) {
     memcpy(app_ctx->output_attrs, output_attrs, io_num.n_output * sizeof(rknn_tensor_attr));
 
     if (input_attrs[0].fmt == RKNN_TENSOR_NCHW) {
-        printf("model is NCHW input fmt\n");
+        LOGI("model is NCHW input fmt\n");
         app_ctx->model_channel = input_attrs[0].dims[1];
         app_ctx->model_height = input_attrs[0].dims[2];
         app_ctx->model_width = input_attrs[0].dims[3];
     } else {
-        printf("model is NHWC input fmt\n");
+        LOGI("model is NHWC input fmt\n");
         app_ctx->model_height = input_attrs[0].dims[1];
         app_ctx->model_width = input_attrs[0].dims[2];
         app_ctx->model_channel = input_attrs[0].dims[3];
     }
-    printf("model input height=%d, width=%d, channel=%d\n",
+    LOGI("model input height=%d, width=%d, channel=%d\n",
            app_ctx->model_height, app_ctx->model_width, app_ctx->model_channel);
 
     return 0;
@@ -180,7 +180,7 @@ int inference_yolov5_model(rknn_app_context_t *app_ctx, image_buffer_t *img,
     dst_img.size = get_image_size(&dst_img);
     dst_img.virt_addr = (unsigned char *) malloc(dst_img.size);
     if (dst_img.virt_addr == NULL) {
-        printf("malloc buffer size:%d fail!\n", dst_img.size);
+        LOGE("malloc buffer size:%d fail!\n", dst_img.size);
         return -1;
     }
 
@@ -189,7 +189,7 @@ int inference_yolov5_model(rknn_app_context_t *app_ctx, image_buffer_t *img,
     // letterbox
     ret = convert_image_with_letterbox(img, &dst_img, &letter_box, bg_color);
     if (ret < 0) {
-        printf("convert_image_with_letterbox fail! ret=%d\n", ret);
+        LOGE("convert_image_with_letterbox fail! ret=%d\n", ret);
         return -1;
     }
 
@@ -203,20 +203,20 @@ int inference_yolov5_model(rknn_app_context_t *app_ctx, image_buffer_t *img,
     // 4.设置输入数据
     ret = rknn_inputs_set(app_ctx->rknn_ctx, app_ctx->io_num.n_input, inputs);
     if (ret < 0) {
-        printf("rknn_input_set fail! ret=%d\n", ret);
+        LOGE("rknn_input_set fail! ret=%d\n", ret);
         return -1;
     }
 
     // 5.进行模型推理
     // Run
-    printf("rknn_run\n");
+    LOGI("rknn_run\n");
     int64_t start_us = getCurrentTimeUs();
     ret = rknn_run(app_ctx->rknn_ctx, nullptr);
     int64_t elapse_us = getCurrentTimeUs() - start_us;
     LOGI("normal Elapse Time = %.2fms, FPS = %.2f\n", elapse_us / 1000.f,
          1000.f * 1000.f / elapse_us);
     if (ret < 0) {
-        printf("rknn_run fail! ret=%d\n", ret);
+        LOGE("rknn_run fail! ret=%d\n", ret);
         return -1;
     }
 
@@ -229,7 +229,7 @@ int inference_yolov5_model(rknn_app_context_t *app_ctx, image_buffer_t *img,
     // 6.获取推理结果数据
     ret = rknn_outputs_get(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs, NULL);
     if (ret < 0) {
-        printf("rknn_outputs_get fail! ret=%d\n", ret);
+        LOGE("rknn_outputs_get fail! ret=%d\n", ret);
         goto out;
     }
 

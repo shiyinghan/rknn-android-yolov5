@@ -119,13 +119,19 @@ int init_yolov5_model_zerocopy(const char *model_path, rknn_app_context_t *app_c
         rknn_set_io_mem(ctx, input_mems[i], &input_attrs[i]);
     }
 
+    int output_size;
     // 4.2 Set outputs memory
     for (int i = 0; i < io_num.n_output; i++) {
         // 4.2.1 Update input attrs
-        output_attrs[i].type = RKNN_TENSOR_INT8;
+        if (output_attrs[i].type == RKNN_TENSOR_FLOAT16) {
+            output_attrs[i].type = RKNN_TENSOR_FLOAT32;
+            output_size = output_attrs[i].n_elems * sizeof(float);
+        } else {
+            output_attrs[i].type = RKNN_TENSOR_INT8;
+            output_size = output_attrs[i].n_elems * sizeof(unsigned char);
+        }
 
         // 4.2.2 Create output tensor memory
-        int output_size = output_attrs[i].n_elems * sizeof(unsigned char);
         output_mems[i] = rknn_create_mem(ctx,
                                          output_size);
         memset(output_mems[i]->virt_addr, 0, output_attrs[i].n_elems);
@@ -139,6 +145,7 @@ int init_yolov5_model_zerocopy(const char *model_path, rknn_app_context_t *app_c
 
     // TODO
     if (output_attrs[0].qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC &&
+        output_attrs[0].type != RKNN_TENSOR_FLOAT32 &&
         output_attrs[0].type != RKNN_TENSOR_FLOAT16) {
         app_ctx->is_quant = true;
     } else {

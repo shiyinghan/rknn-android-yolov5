@@ -89,6 +89,51 @@ int init_yolov5_model_zerocopy(const char *model_path, rknn_app_context_t *app_c
         dump_tensor_attr(&(output_attrs[i]));
     }
 
+    rknn_tensor_mem *input_mems[io_num.n_input];
+    rknn_tensor_mem *output_mems[io_num.n_output];
+
+    // 4. Set input/output buffer
+    // 4.1 Set inputs memory
+    for (int i = 0; i < io_num.n_input; i++) {
+        // 4.1.1 Update input attrs
+        input_attrs[i].index = i;
+        //这里有个有意思的现象，这里模型输入的type格式默认为RKNN_TENSOR_INT8，这就意味着，
+        //归一化及量化操作要在CPU侧进行处理，也就是读完数据后就进行操作，而如果
+        //设置为RKNN_TENSOR_UINT8则归一化及量化操作都放到了NPU上进行。
+        // default input type is int8 (normalize and quantize need compute in outside)
+        // if set uint8, will fuse normalize and quantize to npu
+        input_attrs[i].type = RKNN_TENSOR_UINT8;
+//        input_attrs[i].size = app_ctx->model_width * app_ctx->model_height * app_ctx->model_channel;
+        // default fmt is NHWC, npu only support NHWC in zero copy mode
+        input_attrs[i].fmt = RKNN_TENSOR_NHWC;
+        // TODO -- The efficiency of pass through will be higher, we need adjust the layout of input to
+        //         meet the use condition of pass through.
+        input_attrs[i].pass_through = 0;
+
+        // 4.1.2 Create input tensor memory
+        input_mems[i] = rknn_create_mem(ctx,
+                                        input_attrs[i].size_with_stride);
+        memset(input_mems[0]->virt_addr, 0,
+               input_attrs[0].size_with_stride);
+        // 4.1.3 Set input buffer
+        rknn_set_io_mem(ctx, input_mems[i], &input_attrs[i]);
+    }
+
+    // 4.2 Set outputs memory
+    for (int i = 0; i < io_num.n_output; i++) {
+        // 4.2.1 Update input attrs
+        output_attrs[i].type = RKNN_TENSOR_INT8;
+
+        // 4.2.2 Create output tensor memory
+        int output_size = output_attrs[i].n_elems * sizeof(unsigned char);
+        output_mems[i] = rknn_create_mem(ctx,
+                                         output_size);
+        memset(output_mems[i]->virt_addr, 0, output_attrs[i].n_elems);
+
+        // 4.2.3 Set output buffer
+        rknn_set_io_mem(ctx, output_mems[i], &output_attrs[i]);
+    }
+
     // Set to context
     app_ctx->rknn_ctx = ctx;
 
@@ -104,6 +149,10 @@ int init_yolov5_model_zerocopy(const char *model_path, rknn_app_context_t *app_c
     memcpy(app_ctx->input_attrs, input_attrs, io_num.n_input * sizeof(rknn_tensor_attr));
     app_ctx->output_attrs = (rknn_tensor_attr *) malloc(io_num.n_output * sizeof(rknn_tensor_attr));
     memcpy(app_ctx->output_attrs, output_attrs, io_num.n_output * sizeof(rknn_tensor_attr));
+    app_ctx->input_mems = (rknn_tensor_mem **) malloc(io_num.n_input * sizeof(rknn_tensor_mem *));
+    memcpy(app_ctx->input_mems, input_mems, io_num.n_input * sizeof(rknn_tensor_mem *));
+    app_ctx->output_mems = (rknn_tensor_mem **) malloc(io_num.n_output * sizeof(rknn_tensor_mem *));
+    memcpy(app_ctx->output_mems, output_mems, io_num.n_output * sizeof(rknn_tensor_mem *));
 
     if (input_attrs[0].fmt == RKNN_TENSOR_NCHW) {
         LOGI("model is NCHW input fmt");
@@ -135,6 +184,20 @@ int release_yolov5_model_zerocopy(rknn_app_context_t *app_ctx) {
     if (app_ctx->output_attrs != NULL) {
         free(app_ctx->output_attrs);
         app_ctx->output_attrs = NULL;
+    }
+    if (app_ctx->input_mems != NULL) {
+        for (int i = 0; i < app_ctx->io_num.n_input; i++) {
+            rknn_destroy_mem(app_ctx->rknn_ctx, app_ctx->input_mems[i]);
+        }
+        free(app_ctx->input_mems);
+        app_ctx->input_mems = NULL;
+    }
+    if (app_ctx->output_mems != NULL) {
+        for (int i = 0; i < app_ctx->io_num.n_output; i++) {
+            rknn_destroy_mem(app_ctx->rknn_ctx, app_ctx->output_mems[i]);
+        }
+        free(app_ctx->output_mems);
+        app_ctx->output_mems = NULL;
     }
     return 0;
 }
@@ -168,13 +231,10 @@ static void copyDataToTensorMemory(uint8_t *data, rknn_tensor_mem *tensor_mem,
 int inference_yolov5_model_zerocopy(rknn_app_context_t *app_ctx, image_buffer_t *img,
                                     object_detect_result_list *od_results) {
     int ret;
+    int64_t start_us, elapse_us;
     image_buffer_t dst_img;
     letterbox_t letter_box;
     void *output_data[app_ctx->io_num.n_output];
-
-    // 定义输入输出内存
-    rknn_tensor_mem *input_mems[app_ctx->io_num.n_input];
-    rknn_tensor_mem *output_mems[app_ctx->io_num.n_output];
 
     const float nms_threshold = NMS_THRESH;      // 默认的NMS阈值
     const float box_conf_threshold = BOX_THRESH; // 默认的置信度阈值
@@ -188,52 +248,6 @@ int inference_yolov5_model_zerocopy(rknn_app_context_t *app_ctx, image_buffer_t 
     memset(&letter_box, 0, sizeof(letterbox_t));
     memset(&dst_img, 0, sizeof(image_buffer_t));
 
-    // 4. Set input/output buffer
-    // 4.1 Set inputs memory
-    for (int i = 0; i < app_ctx->io_num.n_input; i++) {
-        // 4.1.1 Update input attrs
-        app_ctx->input_attrs[i].index = i;
-        //这里有个有意思的现象，这里模型输入的type格式默认为RKNN_TENSOR_INT8，这就意味着，
-        //归一化及量化操作要在CPU侧进行处理，也就是读完数据后就进行操作，而如果
-        //设置为RKNN_TENSOR_UINT8则归一化及量化操作都放到了NPU上进行。
-        // default input type is int8 (normalize and quantize need compute in outside)
-        // if set uint8, will fuse normalize and quantize to npu
-        app_ctx->input_attrs[i].type = RKNN_TENSOR_UINT8;
-        app_ctx->input_attrs[i].size =
-                app_ctx->model_width * app_ctx->model_height * app_ctx->model_channel;
-        // default fmt is NHWC, npu only support NHWC in zero copy mode
-        app_ctx->input_attrs[i].fmt = RKNN_TENSOR_NHWC;
-        // TODO -- The efficiency of pass through will be higher, we need adjust the layout of input to
-        //         meet the use condition of pass through.
-        app_ctx->input_attrs[i].pass_through = 0;
-
-        // 4.1.1 Create input tensor memory
-        input_mems[i] = rknn_create_mem(app_ctx->rknn_ctx,
-                                        app_ctx->input_attrs[i].size_with_stride);
-        memset(input_mems[0]->virt_addr, 0,
-               app_ctx->input_attrs[0].size_with_stride);
-        // 4.1.3 Set input buffer
-        rknn_set_io_mem(app_ctx->rknn_ctx, input_mems[i], &app_ctx->input_attrs[i]);
-    }
-
-    // 4.2 Set outputs memory
-    for (int i = 0; i < app_ctx->io_num.n_output; i++) {
-        // 4.2.1 Update input attrs
-        app_ctx->output_attrs[i].type = RKNN_TENSOR_INT8;
-
-        // 4.2.2 Create output tensor memory
-        int output_size = app_ctx->output_attrs[i].n_elems * sizeof(unsigned char);
-        output_mems[i] = rknn_create_mem(app_ctx->rknn_ctx,
-                                         output_size);
-        memset(output_mems[i]->virt_addr, 0, app_ctx->output_attrs[i].n_elems);
-
-        // 4.2.3 Set output buffer
-        rknn_set_io_mem(app_ctx->rknn_ctx, output_mems[i], &app_ctx->output_attrs[i]);
-    }
-
-//    //强制输出float32，在NPU内进行反量化，后处理的nms会用到
-//    app_ctx->is_quant = true;
-
     // Pre Process
     dst_img.width = app_ctx->model_width;
     dst_img.height = app_ctx->model_height;
@@ -245,60 +259,42 @@ int inference_yolov5_model_zerocopy(rknn_app_context_t *app_ctx, image_buffer_t 
         return -1;
     }
 
-    // 3.对输入进行前处理
+    // 对输入进行前处理
     // letterbox操作：在对图片进行resize时，保持原图的长宽比进行等比例缩放，当长边 resize 到需要的长度时，短边剩下的部分采用灰色填充。
     ret = convert_image_with_letterbox(img, &dst_img, &letter_box, bg_color);
     if (ret < 0) {
         LOGI("convert_image_with_letterbox fail! ret=%d", ret);
-        return -1;
+        goto out;
     }
 
-    // 4.设置输入数据
+    // 设置输入数据
     for (int i = 0; i < app_ctx->io_num.n_input; i++) {
         // Copy input data to input tensor memory
-        copyDataToTensorMemory(dst_img.virt_addr, input_mems[i], &app_ctx->input_attrs[i]);
-
-        // rknn_set_io_mem函数设置输入tensor内存，NPU使用
-//        rknn_set_io_mem(app_ctx->rknn_ctx, input_mems[i], &app_ctx->input_attrs[i]);
+        copyDataToTensorMemory(dst_img.virt_addr, app_ctx->input_mems[i], &app_ctx->input_attrs[i]);
     }
 
-    for (int i = 0; i < app_ctx->io_num.n_output; i++) {
-        // rknn_set_io_mem函数设置输出tensor内存，NPU使用
-//        rknn_set_io_mem(app_ctx->rknn_ctx, output_mems[i], &app_ctx->output_attrs[i]);
-    }
-
-    // 5.进行模型推理
+    // 进行模型推理
     // Run
     LOGI("rknn_run");
-    int64_t start_us = getCurrentTimeUs();
+    start_us = getCurrentTimeUs();
     ret = rknn_run(app_ctx->rknn_ctx, nullptr);
-    int64_t elapse_us = getCurrentTimeUs() - start_us;
+    elapse_us = getCurrentTimeUs() - start_us;
     LOGI("zerocopy Elapse Time = %.2fms, FPS = %.2f\n", elapse_us / 1000.f,
          1000.f * 1000.f / elapse_us);
     if (ret < 0) {
         LOGI("rknn_run fail! ret=%d", ret);
-        return -1;
+        goto out;
     }
 
     // Get Output
     for (int i = 0; i < app_ctx->io_num.n_output; i++) {
-        output_data[i] = output_mems[i]->virt_addr;
+        output_data[i] = app_ctx->output_mems[i]->virt_addr;
     }
 
-    // 7.对输出进行后处理
+    // 对输出进行后处理
     // Post Process
     LOGI("post_process");
     post_process(app_ctx, output_data, &letter_box, box_conf_threshold, nms_threshold, od_results);
-
-    // 8.释放输出数据内存
-//    // Remeber to release rknn output
-//    rknn_outputs_release(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs);
-    for (int i = 0; i < app_ctx->io_num.n_input; i++) {
-        rknn_destroy_mem(app_ctx->rknn_ctx, input_mems[i]);
-    }
-    for (int i = 0; i < app_ctx->io_num.n_output; i++) {
-        rknn_destroy_mem(app_ctx->rknn_ctx, output_mems[i]);
-    }
 
     out:
     if (dst_img.virt_addr != NULL) {
